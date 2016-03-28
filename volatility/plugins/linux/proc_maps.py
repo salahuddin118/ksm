@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Volatility.  If not, see <http://www.gnu.org/licenses/>.
 #
+from itertools import count
 
 """
 @author:       Andrew Case
@@ -32,8 +33,8 @@ from volatility.renderers.basic import Address
 
 # Constants
 PAGE_SIZE = 4096 # bytes
-ZYGOTE_COMM = 'zygote'
-NONAME_REGION = '_anonymous_'
+ZYGOTE_COMM = "zygote"
+NONAME_REGION = "_anonymous_"
 VMA_PA_FAIL = 0
 
 VM_R  = 0x00000001 # read
@@ -113,6 +114,41 @@ class linux_proc_maps(linux_pslist.linux_pslist):
                 fname)
 
 # Create ksm map
+class ResultTable(object):
+    def __init__(self):
+        self.__memory_region_dict = {}
+        
+    def add(self, region, hash_value, physical_addr):
+        if self.__memory_region_dict.get(region) is None:
+            self.__memory_region_dict[region] = MemoryRegion(region)
+
+        self.__memory_region_dict[region].add(hash_value, physical_addr)  
+        
+    def hashed_contents(self):
+        return self.__memory_region_dict.values()  
+
+class MemoryRegion(object):
+    def __init__(self, region):
+        self.__region = region
+        self.__hash_list = []
+        self.__physical_addr_list = []
+        
+    def add(self, hash_value, physical_addr):
+        if hash_value not in self.__hash_list:
+            self.__hash_list.append(hash_value)
+        
+        if physical_addr not in self.__physical_addr_list:
+            self.__physical_addr_list.append(physical_addr)
+    
+    def get_memory_region(self):
+        return self.__region
+    
+    def hash_values(self):
+        return self.__hash_list[:]
+    
+    def physical_addresses(self):
+        return self.__physical_addr_list[:]
+        
 class DuplicationTable(object):
     def __init__(self, hash_func=hashlib.md5):
         self.__hashed_content_dict = {}
@@ -249,7 +285,16 @@ class linux_ksmmap(linux_pslist.linux_pslist):
                                  ])
         # build duplication table
         table = self.build_duplication_table(data, hashlib.md5, outfd)
-        self.print_table(table)
+        resultTable = ResultTable()
+        
+        for hashed_content in table.hashed_contents():
+            for physical_page in hashed_content.physical_pages():
+                for virtual_page in physical_page.virtual_pages():
+                    resultTable.add(virtual_page.get_region(), 
+                                    hashed_content.get_hash_value(), 
+                                    physical_page.get_address())
+        self.print_result_table(resultTable)
+        #self.print_table(table)
     
     def build_duplication_table(self, data, hash_func, outfd):
         table = DuplicationTable()
@@ -260,7 +305,12 @@ class linux_ksmmap(linux_pslist.linux_pslist):
             pid = int(task.pid)
             (fname, major, minor, ino, pgoff) = vma.info(task)
             
-            region = NONAME_REGION if fname is None else str(fname)
+            # Debug
+            #if pid > 100:
+            #    break
+            
+            # fname is not None it is "", mark anonymous
+            region = NONAME_REGION if fname == "" else str(fname)
             vm_start = int(vma.vm_start)
             vm_end = int(vma.vm_end)
             vm_flags = int(vma.vm_flags)
@@ -272,11 +322,11 @@ class linux_ksmmap(linux_pslist.linux_pslist):
             if vm_flags & VM_IO:
             # skip memory-mapped region
                 continue
-    
-            if prev_region.endswith('.so') and region == NONAME_REGION:
+            
             # assume that the very next region of library(.so) region
             # with noname is BSS segment for that library.
-                region = prev_region + '(bss)'
+            if prev_region.endswith(".so") and region == NONAME_REGION:
+                region = prev_region + "(bss)"
     
             prev_region = region
             task_space = task.get_process_address_space()
@@ -304,6 +354,22 @@ class linux_ksmmap(linux_pslist.linux_pslist):
 
         table.finalize()
         return table
+
+    def print_result_table(self, table):
+        for memory_regions in table.hashed_contents():
+            print memory_regions.get_memory_region()
+            print len(memory_regions.hash_values())
+            print len(memory_regions.physical_addresses())
+            print ''
+
+    def print_result_table1(self, table):
+        for memory_regions in table.hashed_contents():
+            print memory_regions.get_memory_region()
+            for hash_value in memory_regions.hash_values():
+                print hash_value
+            for physical_page in memory_regions.physical_addresses():
+                print '\t0x%08x' % physical_page
+            print ''
 
     def print_table(self, table):
         for hashed_content in table.hashed_contents():
