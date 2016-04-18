@@ -25,6 +25,7 @@ from itertools import count
 """
 
 import hashlib
+import os.path
 import volatility.obj as obj
 import volatility.plugins.linux.common as linux_common
 import volatility.plugins.linux.pslist as linux_pslist
@@ -114,7 +115,7 @@ class linux_proc_maps(linux_pslist.linux_pslist):
                 fname)
 
 # Create ksm map
-class ResultTable(object):
+class RegionTable(object):
     def __init__(self):
         self.__memory_region_dict = {}
         
@@ -148,6 +149,45 @@ class MemoryRegion(object):
     
     def physical_addresses(self):
         return self.__physical_addr_list[:]
+
+class PidTable(object):
+    def __init__(self):
+        self.__memory_region_dict = {}
+        
+    def add(self, pid, name, hash_value, physical_addr):
+        if self.__memory_region_dict.get(pid) is None:
+            self.__memory_region_dict[pid] = MemoryRegion1(pid, name)
+
+        self.__memory_region_dict[pid].add(hash_value, physical_addr)  
+        
+    def hashed_contents(self):
+        return self.__memory_region_dict.values()  
+
+class MemoryRegion1(object):
+    def __init__(self, pid, name):
+        self.__pid = pid
+        self.__name = name
+        self.__hash_list = []
+        self.__physical_addr_list = []
+        
+    def add(self, hash_value, physical_addr):
+        if hash_value not in self.__hash_list:
+            self.__hash_list.append(hash_value)
+        
+        if physical_addr not in self.__physical_addr_list:
+            self.__physical_addr_list.append(physical_addr)
+    
+    def get_pid(self):
+        return self.__pid
+    
+    def get_name(self):
+        return self.__name
+    
+    def hash_values(self):
+        return self.__hash_list[:]
+    
+    def physical_addresses(self):
+        return self.__physical_addr_list[:]
         
 class DuplicationTable(object):
     def __init__(self, hash_func=hashlib.md5):
@@ -159,6 +199,11 @@ class DuplicationTable(object):
 
         if self.__hashed_content_dict.get(content_hash) is None:
             self.__hashed_content_dict[content_hash] = HashedContent(content_hash)
+            file_name = content_hash
+            file_path = os.path.join("/home/salahuddin/hash/", file_name)
+            outfile = open(file_path, "wb+")
+            outfile.write(content)
+            outfile.close()
 
         self.__hashed_content_dict[content_hash].add(physical_addr, pid, comm, virtual_addr, region, flags)
 
@@ -275,6 +320,18 @@ class linux_ksmmap(linux_pslist.linux_pslist):
                 str(fname)])
 
     def render_text(self, outfd, data):
+        #self.create_duplication_table(data, outfd)
+        #self.create_region_table(data, outfd)
+        #self.create_pid_table(data, outfd)
+        self.create_content_table(data, outfd)
+    
+    # Content sharing
+    def create_content_table(self, data, outfd):
+        table = self.build_duplication_table(data, hashlib.md5, outfd)
+        self.print_content_table(table)    
+    
+    # Hash Value -> Physical address -> Virtual address
+    def create_duplication_table(self, data, outfd):
         self.table_header(outfd, [("Hash","32"),
                                   ("Pid", "8"),
                                   ("Name","20"),
@@ -285,16 +342,38 @@ class linux_ksmmap(linux_pslist.linux_pslist):
                                  ])
         # build duplication table
         table = self.build_duplication_table(data, hashlib.md5, outfd)
-        resultTable = ResultTable()
+        self.print_duplication_table(table)
+    
+    # Memory Region -> # of unique Hash -> # of PA
+    def create_region_table(self, data, outfd):
+        # build duplication table
+        table = self.build_duplication_table(data, hashlib.md5, outfd)
+        regionTable = RegionTable()
         
         for hashed_content in table.hashed_contents():
             for physical_page in hashed_content.physical_pages():
                 for virtual_page in physical_page.virtual_pages():
-                    resultTable.add(virtual_page.get_region(), 
+                    regionTable.add(virtual_page.get_region(), 
                                     hashed_content.get_hash_value(), 
                                     physical_page.get_address())
-        self.print_result_table(resultTable)
-        #self.print_table(table)
+        self.print_region_table(regionTable)
+    
+    # Name/PID -> # of unique Hash -> # of PA
+    def create_pid_table(self, data, outfd):
+        # build duplication table
+        table = self.build_duplication_table(data, hashlib.md5, outfd)
+        pidTable = PidTable()
+        
+        for hashed_content in table.hashed_contents():
+            for physical_page in hashed_content.physical_pages():
+                for virtual_page in physical_page.virtual_pages():
+                    pidTable.add(virtual_page.get_pid(),
+                                    virtual_page.get_comm(), 
+                                    hashed_content.get_hash_value(), 
+                                    physical_page.get_address())
+                                
+        self.print_pid_table(pidTable)
+        
     
     def build_duplication_table(self, data, hash_func, outfd):
         table = DuplicationTable()
@@ -355,23 +434,28 @@ class linux_ksmmap(linux_pslist.linux_pslist):
         table.finalize()
         return table
 
-    def print_result_table(self, table):
+    def print_region_table(self, table):
         for memory_regions in table.hashed_contents():
             print memory_regions.get_memory_region()
             print len(memory_regions.hash_values())
             print len(memory_regions.physical_addresses())
             print ''
-
-    def print_result_table1(self, table):
+            
+    def print_pid_table(self, table):
         for memory_regions in table.hashed_contents():
-            print memory_regions.get_memory_region()
-            for hash_value in memory_regions.hash_values():
-                print hash_value
-            for physical_page in memory_regions.physical_addresses():
-                print '\t0x%08x' % physical_page
+            print memory_regions.get_pid()
+            print memory_regions.get_name()
+            print len(memory_regions.hash_values())
+            print len(memory_regions.physical_addresses())
+            print ''        
+
+    def print_content_table(self, table):
+        for hashed_content in table.hashed_contents():
+            print hashed_content.get_hash_value()
+            print len(hashed_content.physical_pages())
             print ''
 
-    def print_table(self, table):
+    def print_duplication_table(self, table):
         for hashed_content in table.hashed_contents():
             print hashed_content.get_hash_value()
             for physical_page in hashed_content.physical_pages():
